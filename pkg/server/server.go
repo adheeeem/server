@@ -13,7 +13,7 @@ import (
 
 var ErrVersionNotCompatible = errors.New("not compatible version")
 
-type HandlerFunc func(conn net.Conn)
+type HandlerFunc func(req *Request)
 
 type Server struct {
 	addr     string
@@ -24,6 +24,9 @@ type Server struct {
 type Request struct {
 	Conn        net.Conn
 	QueryParams url.Values
+	PathParams  map[string]string
+	Headers     map[string]string
+	Body        []byte
 }
 
 func NewServer(addr string) *Server {
@@ -74,7 +77,7 @@ func (s *Server) handle(conn net.Conn) (err error) {
 			log.Print(err)
 		}
 	}()
-
+	var reqPath string
 	buf := make([]byte, 4096)
 	n, err := conn.Read(buf)
 
@@ -86,6 +89,7 @@ func (s *Server) handle(conn net.Conn) (err error) {
 	}
 
 	data := buf[:n]
+
 	requestLineDelim := []byte{'\r', '\n'}
 	requestLineEnd := bytes.Index(data, requestLineDelim)
 
@@ -99,19 +103,62 @@ func (s *Server) handle(conn net.Conn) (err error) {
 		return
 	}
 
-	path, version := parts[1], parts[2]
+	var req Request
+
+	method, path, version := parts[0], parts[1], parts[2]
+	uri, err := url.ParseRequestURI(path)
+
+	id := uri.Query().Get("id")
+
+	if method == "POST" || method == "PUT" {
+		bodyDelim := []byte{'{'}
+		brStart := bytes.Index(data, bodyDelim)
+		body := data[brStart+1 : len(data)-2]
+		req.Body = body
+		log.Print(string(req.Body))
+	}
+
+	if id != "" {
+		req.QueryParams = map[string][]string{
+			"id": {id},
+		}
+		reqPath = "/payments"
+	} else {
+		reqPars := strings.Split(uri.String(), "/")
+		req.PathParams = map[string]string{
+			"id": reqPars[2],
+		}
+		reqPath = "/payments/{id}"
+	}
+
+	req.Conn = conn
 
 	if version != "HTTP/1.1" {
 		return ErrVersionNotCompatible
 	}
 
 	s.mu.RLock()
-	handlePath := s.handlers[path]
-	if handlePath == nil {
-		return
-	}
+
+	handlePath, ok := s.handlers[reqPath]
+
 	s.mu.RUnlock()
-	handlePath(conn)
+
+	if ok {
+		req.Headers = getHeaders(string(data))
+		handlePath(&req)
+	}
 
 	return nil
+}
+
+func getHeaders(header string) map[string]string {
+	lines := strings.Split(header, "\n")
+	result := make(map[string]string)
+	for _, line := range lines {
+		temp := strings.Split(line, ":")
+		if len(temp) == 2 {
+			result[temp[0]] = temp[1]
+		}
+	}
+	return result
 }
